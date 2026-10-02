@@ -10,7 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -100,6 +102,98 @@ func (r *Runner) safeDest(name string) (string, error) {
 func isGit(path string) bool {
 	st, err := os.Stat(filepath.Join(path, ".git"))
 	return err == nil && st.IsDir()
+}
+
+// ─────────────── Sesiones de Claude Code (cerrar/pausar/reanudar) ───────────────
+// Lista blanca estricta: solo actúa sobre procesos cuyo comando contiene "claude"
+// (el CLI de Claude Code). Nunca mata PIDs arbitrarios.
+
+type Session struct {
+	Pid     int    `json:"pid"`
+	Command string `json:"command"`
+}
+
+// Sessions lista los procesos de Claude Code en ejecución en la PC.
+func (r *Runner) Sessions() ([]Session, error) {
+	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
+	if err != nil {
+		return nil, err
+	}
+	var sessions []Session
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		sp := strings.SplitN(line, " ", 2)
+		if len(sp) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(sp[0]))
+		if err != nil {
+			continue
+		}
+		cmd := strings.TrimSpace(sp[1])
+		// Solo sesiones reales de Claude Code (ejecutable == claude), no cualquier ruta con "claude".
+		if !looksLikeClaude(cmd) {
+			continue
+		}
+		if len(cmd) > 160 {
+			cmd = cmd[:160] + "…"
+		}
+		sessions = append(sessions, Session{Pid: pid, Command: cmd})
+	}
+	return sessions, nil
+}
+
+// looksLikeClaude: el ejecutable del proceso es "claude" (no una ruta cualquiera que lo contenga).
+func looksLikeClaude(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	if filepath.Base(fields[0]) == "claude" {
+		return true
+	}
+	// o algún token es una ruta a un ejecutable claude (…/claude)
+	for _, f := range fields {
+		if strings.Contains(f, "/") && filepath.Base(f) == "claude" {
+			return true
+		}
+	}
+	return false
+}
+
+// isClaude verifica que el PID corresponde a un proceso de Claude Code (anti-kill arbitrario).
+func (r *Runner) isClaude(pid int) bool {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	return looksLikeClaude(strings.TrimSpace(string(out)))
+}
+
+// SignalSession envía la señal correspondiente SOLO si el PID es un proceso de Claude Code.
+// action: "close" (SIGTERM), "pause" (SIGSTOP), "resume" (SIGCONT).
+func (r *Runner) SignalSession(pid int, action string) error {
+	if pid <= 1 {
+		return fmt.Errorf("pid inválido")
+	}
+	if !r.isClaude(pid) {
+		return fmt.Errorf("el PID %d no es una sesión de Claude Code (no se toca)", pid)
+	}
+	var sig syscall.Signal
+	switch action {
+	case "close":
+		sig = syscall.SIGTERM
+	case "pause":
+		sig = syscall.SIGSTOP
+	case "resume":
+		sig = syscall.SIGCONT
+	default:
+		return fmt.Errorf("acción de sesión no permitida: %s", action)
+	}
+	return syscall.Kill(pid, sig)
 }
 
 var urlName = regexp.MustCompile(`([^/]+?)(?:\.git)?/?$`)

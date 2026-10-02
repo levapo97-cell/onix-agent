@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/nats-io/nats.go"
@@ -21,18 +22,20 @@ import (
 const subjectCmd = "onix.agent.cmd"
 
 type request struct {
-	Action string `json:"action"` // project.list | repo.check | repo.clone
+	Action string `json:"action"` // project.list | repo.check | repo.clone | session.list | session.close|pause|resume
 	Name   string `json:"name"`
 	URL    string `json:"url"`
+	Pid    int    `json:"pid"`
 }
 
 type reply struct {
-	OK       bool               `json:"ok"`
-	Error    string             `json:"error,omitempty"`
-	Projects []actions.Project  `json:"projects,omitempty"`
-	Exists   *bool              `json:"exists,omitempty"`
-	Path     string             `json:"path,omitempty"`
-	Output   string             `json:"output,omitempty"`
+	OK       bool              `json:"ok"`
+	Error    string            `json:"error,omitempty"`
+	Projects []actions.Project `json:"projects,omitempty"`
+	Sessions []actions.Session `json:"sessions,omitempty"`
+	Exists   *bool             `json:"exists,omitempty"`
+	Path     string            `json:"path,omitempty"`
+	Output   string            `json:"output,omitempty"`
 }
 
 func main() {
@@ -94,6 +97,18 @@ func handle(run *actions.Runner, req request) reply {
 			return reply{Error: err.Error(), Output: out}
 		}
 		return reply{OK: true, Path: path, Output: out}
+	case "session.list":
+		ss, err := run.Sessions()
+		if err != nil {
+			return reply{Error: err.Error()}
+		}
+		return reply{OK: true, Sessions: ss}
+	case "session.close", "session.pause", "session.resume":
+		act := strings.TrimPrefix(req.Action, "session.")
+		if err := run.SignalSession(req.Pid, act); err != nil {
+			return reply{Error: err.Error()}
+		}
+		return reply{OK: true}
 	default:
 		return reply{Error: "acción no permitida: " + req.Action}
 	}
